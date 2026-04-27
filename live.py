@@ -4,7 +4,7 @@ Candle-Reversal Live Trader — Gate.io USDT-PERP
 params: big_mult=1.8, cover=0.3, rr=3.5, avg_len=10
 SL: 신호봉 고가(short) / 저가(long)
 TP: entry ± sl_dist × 3.5
-리스크: 잔고의 5%/트레이드 (50 USDT @ 1000 USDT), 레버리지 10x
+리스크: 고정 10 USDT/트레이드, 레버리지 10x, 마진 ~100-150 USDT
 """
 import os
 import sys
@@ -35,8 +35,8 @@ BIG_MULT     = 1.8
 COVER_PCT    = 0.3
 RR_RATIO     = 3.5
 AVG_LEN      = 10
-RISK_PCT     = 0.05           # 잔고의 5% (1000 USDT → 손실 50 USDT/트레이드)
-LEVERAGE     = 10             # 레버리지 (진입 마진 = 포지션/10)
+RISK_USDT    = 10             # 고정 리스크: 손실 10 USDT/트레이드
+LEVERAGE     = 10             # 레버리지 (마진 = 포지션노셔널/10)
 
 CONTRACT     = "BTC_USDT"
 SETTLE       = "usdt"
@@ -150,10 +150,9 @@ def get_last_price(api: FuturesApi) -> float:
     return float(tickers[0].last)
 
 
-def calc_contracts(balance: float, sl_dist: float) -> int:
-    """0.5% 리스크 기반 계약수 (최소 1)."""
-    risk_usdt = balance * RISK_PCT
-    return max(1, int(risk_usdt / (sl_dist * QUANTO)))
+def calc_contracts(sl_dist: float) -> int:
+    """고정 10 USDT 리스크 기반 계약수 (최소 1)."""
+    return max(1, int(RISK_USDT / (sl_dist * QUANTO)))
 
 
 # ── 포지션 ────────────────────────────────────────────────────────────
@@ -244,7 +243,7 @@ class CandleReversalTrader:
 
         tp_price  = (last_price - sl_dist * RR_RATIO if signal == "short"
                      else last_price + sl_dist * RR_RATIO)
-        contracts = calc_contracts(balance, sl_dist)
+        contracts = calc_contracts(sl_dist)
 
         logger.info(
             f"신호: {signal.upper()} | last≈{last_price:.1f} "
