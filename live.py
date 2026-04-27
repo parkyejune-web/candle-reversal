@@ -4,7 +4,7 @@ Candle-Reversal Live Trader — Gate.io USDT-PERP
 params: big_mult=1.8, cover=0.3, rr=3.5, avg_len=10
 SL: 신호봉 고가(short) / 저가(long)
 TP: entry ± sl_dist × 3.5
-리스크: 잔고의 0.5%/트레이드
+리스크: 잔고의 5%/트레이드 (50 USDT @ 1000 USDT), 레버리지 10x
 """
 import os
 import sys
@@ -35,7 +35,8 @@ BIG_MULT     = 1.8
 COVER_PCT    = 0.3
 RR_RATIO     = 3.5
 AVG_LEN      = 10
-RISK_PCT     = 0.005          # 잔고의 0.5%
+RISK_PCT     = 0.05           # 잔고의 5% (1000 USDT → 손실 50 USDT/트레이드)
+LEVERAGE     = 10             # 레버리지 (진입 마진 = 포지션/10)
 
 CONTRACT     = "BTC_USDT"
 SETTLE       = "usdt"
@@ -67,7 +68,18 @@ def make_api() -> FuturesApi:
         key=os.environ["GATE_API_KEY"],
         secret=os.environ["GATE_API_SECRET"],
     )
-    return FuturesApi(ApiClient(cfg))
+    api = FuturesApi(ApiClient(cfg))
+    try:
+        api.update_position_leverage(
+            settle=SETTLE,
+            contract=CONTRACT,
+            leverage=str(LEVERAGE),
+            cross_leverage_limit="0",
+        )
+        logger.info(f"레버리지 {LEVERAGE}x 설정 완료")
+    except Exception as e:
+        logger.warning(f"레버리지 설정 실패: {e}")
+    return api
 
 
 # ── 캔들 데이터 ───────────────────────────────────────────────────────
