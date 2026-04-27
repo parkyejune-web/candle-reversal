@@ -4,7 +4,7 @@ Candle-Reversal Live Trader — Gate.io USDT-PERP
 params: big_mult=1.8, cover=0.3, rr=3.5, avg_len=10
 SL: 신호봉 고가(short) / 저가(long)
 TP: entry ± sl_dist × 3.5
-리스크: 고정 10 USDT/트레이드, 레버리지 10x, 마진 ~100-150 USDT
+리스크: 잔고 0.5%/트레이드, 레버리지 동적 (노셔널 > 잔고일 때만 올림)
 """
 import os
 import sys
@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import math
 import numpy as np
 import pandas as pd
 import gate_api
@@ -35,8 +36,8 @@ BIG_MULT     = 1.8
 COVER_PCT    = 0.3
 RR_RATIO     = 3.5
 AVG_LEN      = 10
-RISK_USDT    = 10             # 고정 리스크: 손실 10 USDT/트레이드
-LEVERAGE     = 10             # 레버리지 (마진 = 포지션노셔널/10)
+RISK_PCT     = 0.005          # 잔고의 0.5% 리스크/트레이드
+MAX_LEVERAGE = 20             # 레버리지 상한
 
 CONTRACT     = "BTC_USDT"
 SETTLE       = "usdt"
@@ -68,18 +69,7 @@ def make_api() -> FuturesApi:
         key=os.environ["GATE_API_KEY"],
         secret=os.environ["GATE_API_SECRET"],
     )
-    api = FuturesApi(ApiClient(cfg))
-    try:
-        api.update_position_leverage(
-            settle=SETTLE,
-            contract=CONTRACT,
-            leverage=str(LEVERAGE),
-            cross_leverage_limit="0",
-        )
-        logger.info(f"레버리지 {LEVERAGE}x 설정 완료")
-    except Exception as e:
-        logger.warning(f"레버리지 설정 실패: {e}")
-    return api
+    return FuturesApi(ApiClient(cfg))
 
 
 # ── 캔들 데이터 ───────────────────────────────────────────────────────
@@ -150,9 +140,14 @@ def get_last_price(api: FuturesApi) -> float:
     return float(tickers[0].last)
 
 
-def calc_contracts(sl_dist: float) -> int:
-    """고정 10 USDT 리스크 기반 계약수 (최소 1)."""
-    return max(1, int(RISK_USDT / (sl_dist * QUANTO)))
+def calc_entry(balance: float, sl_dist: float, last_price: float) -> tuple:
+    """0.5% 리스크 기반 계약수 + 동적 레버리지 반환."""
+    risk_usdt = balance * RISK_PCT
+    contracts = max(1, int(risk_usdt / (sl_dist * QUANTO)))
+    notional  = contracts * QUANTO * last_price
+    # 노셔널이 잔고 초과할 때만 최소 레버리지 사용, 기본 1x
+    leverage = max(1, min(math.ceil(notional / balance), MAX_LEVERAGE))
+    return contracts, leverage
 
 
 # ── 포지션 ────────────────────────────────────────────────────────────
@@ -243,12 +238,23 @@ class CandleReversalTrader:
 
         tp_price  = (last_price - sl_dist * RR_RATIO if signal == "short"
                      else last_price + sl_dist * RR_RATIO)
-        contracts = calc_contracts(sl_dist)
+        contracts, leverage = calc_entry(balance, sl_dist, last_price)
+
+        # 레버리지 동적 설정
+        try:
+            self.api.update_position_leverage(
+                settle=SETTLE, contract=CONTRACT, leverage=str(leverage))
+            logger.info(f"레버리지 {leverage}x 설정")
+        except Exception as e:
+            logger.warning(f"레버리지 설정 실패: {e}")
+            if leverage > 1:
+                tg.send_error(f"레버리지 설정 실패로 진입 취소: {e}")
+                return
 
         logger.info(
             f"신호: {signal.upper()} | last≈{last_price:.1f} "
             f"sl={sl_price:.1f} tp={tp_price:.1f} | "
-            f"contracts={contracts} risk≈${balance * RISK_PCT:.2f}"
+            f"contracts={contracts} lev={leverage}x risk≈{RISK_PCT*100:.1f}%"
         )
 
         self._last_sig_ts = sig_ts
@@ -460,7 +466,7 @@ class CandleReversalTrader:
         logger.info(
             f"Candle-Reversal 시작 | {'DEMO' if DEMO else 'LIVE'} | "
             f"big={BIG_MULT} cover={COVER_PCT} rr={RR_RATIO} avg={AVG_LEN} | "
-            f"risk={RISK_PCT * 100:.1f}%"
+            f"risk={RISK_PCT*100:.1f}%"
         )
         tg.send_startup(demo=DEMO, risk_pct=RISK_PCT * 100)
 
