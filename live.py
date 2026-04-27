@@ -121,13 +121,13 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
 
 # ── 유틸 ──────────────────────────────────────────────────────────────
 def get_balance(api: FuturesApi) -> float:
-    return float(api.get_futures_account(settle=SETTLE).available)
+    return float(api.list_futures_accounts(settle=SETTLE).available)
 
 
 def get_position_size(api: FuturesApi) -> int:
     """현재 포지션 크기 (양수=롱, 음수=숏, 0=없음)."""
     try:
-        pos = api.get_futures_position(settle=SETTLE, contract=CONTRACT)
+        pos = api.get_position(settle=SETTLE, contract=CONTRACT)
         return int(pos.size)
     except Exception:
         return 0
@@ -314,7 +314,7 @@ class CandleReversalTrader:
                             size=close_size,
                             price="0",
                             tif="ioc",
-                            is_reduce_only=True,
+                            reduce_only=True,
                             text=f"t-cr-{label.lower()}",
                         ),
                         trigger=FuturesPriceTrigger(
@@ -377,7 +377,7 @@ class CandleReversalTrader:
 
         pnl = None
         try:
-            closes = self.api.list_futures_position_close(
+            closes = self.api.list_position_close(
                 settle=SETTLE, contract=CONTRACT, limit=1)
             if closes:
                 pnl = float(closes[0].pnl)
@@ -423,7 +423,7 @@ class CandleReversalTrader:
                 futures_order=FuturesOrder(
                     contract=CONTRACT, size=close_size,
                     price="0", tif="ioc",
-                    is_reduce_only=True,
+                    reduce_only=True,
                     text="t-cr-force",
                 )
             )
