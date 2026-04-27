@@ -126,10 +126,11 @@ def get_balance(api: FuturesApi) -> float:
 
 def get_position_size(api: FuturesApi) -> int:
     """현재 포지션 크기 (양수=롱, 음수=숏, 0=없음)."""
-    positions = api.list_futures_positions(settle=SETTLE, contract=CONTRACT)
-    for p in positions:
-        return int(p.size)
-    return 0
+    try:
+        pos = api.get_futures_position(settle=SETTLE, contract=CONTRACT)
+        return int(pos.size)
+    except Exception:
+        return 0
 
 
 def get_last_price(api: FuturesApi) -> float:
