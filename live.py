@@ -182,6 +182,7 @@ class CandleReversalTrader:
         self._wins    = stats["wins"]
         self._losses  = stats["losses"]
         self._daily_date: Optional[str] = None
+        self._recover_position()
 
     def _load_stats(self) -> dict:
         try:
@@ -212,6 +213,75 @@ class CandleReversalTrader:
                 f.write(str(ts))
         except Exception as e:
             logger.warning(f"sig_ts 저장 실패: {e}")
+
+    def _cancel_all_trigger_orders(self) -> None:
+        """포지션 없을 때 잔류 트리거 주문 전체 취소."""
+        try:
+            open_orders = self.api.list_price_triggered_orders(
+                settle=SETTLE, status="open", contract=CONTRACT)
+            if not open_orders:
+                return
+            for o in open_orders:
+                try:
+                    self.api.cancel_price_triggered_order(
+                        settle=SETTLE, order_id=str(o.id))
+                    logger.info(f"잔류 트리거 주문 취소: {o.id}")
+                except Exception as e:
+                    logger.debug(f"취소 실패(이미 체결?): {o.id}  {e}")
+            logger.warning(f"잔류 트리거 주문 {len(open_orders)}개 취소 완료")
+        except Exception as e:
+            logger.warning(f"트리거 주문 조회 실패: {e}")
+
+    def _recover_position(self) -> None:
+        """재시작 후 오픈 포지션 복원 — 없으면 잔류 트리거 주문 청소."""
+        try:
+            size = get_position_size(self.api)
+        except Exception as e:
+            logger.warning(f"포지션 복원 조회 실패: {e}")
+            return
+
+        if size == 0:
+            self._cancel_all_trigger_orders()
+            return
+
+        try:
+            pos_data    = self.api.get_position(settle=SETTLE, contract=CONTRACT)
+            entry_price = float(pos_data.entry_price or 0)
+        except Exception as e:
+            logger.warning(f"포지션 상세 조회 실패: {e}")
+            return
+
+        side      = "long" if size > 0 else "short"
+        contracts = abs(size)
+
+        # 오픈 트리거 주문에서 sl_id / tp_id 찾기
+        sl_id = tp_id = None
+        try:
+            open_orders = self.api.list_price_triggered_orders(
+                settle=SETTLE, status="open", contract=CONTRACT)
+            for o in open_orders:
+                order_price = float(getattr(o.initial, "price", "0") or "0")
+                if order_price == 0.0:
+                    sl_id = o.id   # market(IOC) → SL
+                else:
+                    tp_id = o.id   # limit(GTC) → TP
+        except Exception as e:
+            logger.warning(f"트리거 주문 조회 실패: {e}")
+
+        self.pos = Position(
+            side=side, entry=entry_price, sl=0.0, tp=0.0,
+            contracts=contracts, entry_ts=datetime.now(timezone.utc),
+            sl_id=sl_id, tp_id=tp_id,
+        )
+        logger.warning(
+            f"[복원] {side.upper()} {contracts}계약 @ {entry_price:.1f}  "
+            f"sl_id={sl_id} tp_id={tp_id}"
+        )
+        tg.send_error(
+            f"[복원] 재시작 전 포지션 발견\n"
+            f"{side.upper()} {contracts}계약 @ ${entry_price:,.1f}\n"
+            f"SL_id={sl_id}  TP_id={tp_id}"
+        )
 
     def _stats(self) -> dict:
         t = self._wins + self._losses
@@ -439,9 +509,16 @@ class CandleReversalTrader:
             except Exception:
                 pnl = 0.0
 
-        sl_dist   = abs(pos.entry_price - pos.sl)
-        risk_usdt = pos.contracts * QUANTO * sl_dist
-        r_unit    = pnl / risk_usdt if risk_usdt > 0 else 0.0
+        if pos.sl != 0.0:
+            sl_dist   = abs(pos.entry_price - pos.sl)
+            risk_usdt = pos.contracts * QUANTO * sl_dist
+        else:
+            # 재시작으로 복원된 포지션 — SL 거리 불명, 잔고 기반 추정
+            try:
+                risk_usdt = get_balance(self.api) * RISK_PCT
+            except Exception:
+                risk_usdt = 10.0
+        r_unit = pnl / risk_usdt if risk_usdt > 0 else 0.0
 
         if pnl > 0:
             self._wins += 1
