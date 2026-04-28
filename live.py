@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import json
 import math
 import numpy as np
 import pandas as pd
@@ -142,11 +143,13 @@ def get_last_price(api: FuturesApi) -> float:
 
 def calc_entry(balance: float, sl_dist: float, last_price: float) -> tuple:
     """0.5% 리스크 기반 계약수 + 동적 레버리지 반환."""
-    risk_usdt = balance * RISK_PCT
-    contracts = max(1, int(risk_usdt / (sl_dist * QUANTO)))
-    notional  = contracts * QUANTO * last_price
-    # 노셔널이 잔고 초과할 때만 최소 레버리지 사용, 기본 1x
-    leverage = max(1, min(math.ceil(notional / balance), MAX_LEVERAGE))
+    risk_usdt    = balance * RISK_PCT
+    contracts    = max(1, int(risk_usdt / (sl_dist * QUANTO)))
+    # MAX_LEVERAGE에서 잔고로 열 수 있는 최대 계약수 — 초과하면 400 INSUFFICIENT_AVAILABLE
+    max_by_margin = max(1, int(balance * MAX_LEVERAGE / (QUANTO * last_price)))
+    contracts    = min(contracts, max_by_margin)
+    notional     = contracts * QUANTO * last_price
+    leverage     = max(1, min(math.ceil(notional / balance), MAX_LEVERAGE))
     return contracts, leverage
 
 
@@ -167,6 +170,7 @@ class Position:
 
 # ── 트레이더 ──────────────────────────────────────────────────────────
 LAST_SIG_FILE = ".last_signal_ts"
+STATS_FILE    = ".stats.json"
 
 
 class CandleReversalTrader:
@@ -174,9 +178,25 @@ class CandleReversalTrader:
         self.api      = make_api()
         self.pos: Optional[Position] = None
         self._last_sig_ts: Optional[int] = self._load_sig_ts()
-        self._wins    = 0
-        self._losses  = 0
+        stats = self._load_stats()
+        self._wins    = stats["wins"]
+        self._losses  = stats["losses"]
         self._daily_date: Optional[str] = None
+
+    def _load_stats(self) -> dict:
+        try:
+            with open(STATS_FILE) as f:
+                d = json.load(f)
+                return {"wins": int(d.get("wins", 0)), "losses": int(d.get("losses", 0))}
+        except Exception:
+            return {"wins": 0, "losses": 0}
+
+    def _save_stats(self) -> None:
+        try:
+            with open(STATS_FILE, "w") as f:
+                json.dump({"wins": self._wins, "losses": self._losses}, f)
+        except Exception as e:
+            logger.warning(f"stats 저장 실패: {e}")
 
     def _load_sig_ts(self) -> Optional[int]:
         try:
@@ -431,6 +451,7 @@ class CandleReversalTrader:
             status = "LOSS"
         else:
             status = "EVEN"
+        self._save_stats()
 
         logger.info(f"청산: {status}  R={r_unit:+.2f}")
         tg.send_exit(status=status, side=pos.side, entry=pos.entry_price,
