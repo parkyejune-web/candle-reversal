@@ -34,7 +34,7 @@ def send_startup(demo: bool, risk_pct: float) -> None:
     _send(
         f"{mode} | Candle-Reversal 시작\n"
         f"▸ BTC_USDT 1m | 장대봉+반대봉 역추세\n"
-        f"▸ 리스크 {risk_pct:.1f}%/트레이드\n"
+        f"▸ 고정 $100 / 1배율\n"
         f"▸ big=1.8  cover=0.3  rr=3.5  avg=10\n"
         f"▸ {_now_kst()} KST"
     )

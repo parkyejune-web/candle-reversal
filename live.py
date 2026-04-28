@@ -4,7 +4,7 @@ Candle-Reversal Live Trader — Gate.io USDT-PERP
 params: big_mult=1.8, cover=0.3, rr=3.5, avg_len=10
 SL: 신호봉 고가(short) / 저가(long)
 TP: entry ± sl_dist × 3.5
-리스크: 잔고 0.5%/트레이드, 레버리지 동적 (노셔널 > 잔고일 때만 올림)
+포지션: 고정 $100 / 레버리지 1x
 """
 import os
 import sys
@@ -14,7 +14,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import json
-import math
 import numpy as np
 import pandas as pd
 import gate_api
@@ -37,8 +36,8 @@ BIG_MULT     = 1.8
 COVER_PCT    = 0.3
 RR_RATIO     = 3.5
 AVG_LEN      = 10
-RISK_PCT     = 0.005          # 잔고의 0.5% 리스크/트레이드
-MAX_LEVERAGE = 20             # 레버리지 상한
+RISK_USDT    = 100.0          # 고정 베팅 $100
+LEVERAGE     = 1              # 고정 1배율
 
 CONTRACT     = "BTC_USDT"
 SETTLE       = "usdt"
@@ -141,16 +140,10 @@ def get_last_price(api: FuturesApi) -> float:
     return float(tickers[0].last)
 
 
-def calc_entry(balance: float, sl_dist: float, last_price: float) -> tuple:
-    """0.5% 리스크 기반 계약수 + 동적 레버리지 반환."""
-    risk_usdt    = balance * RISK_PCT
-    contracts    = max(1, int(risk_usdt / (sl_dist * QUANTO)))
-    # MAX_LEVERAGE에서 잔고로 열 수 있는 최대 계약수 — 초과하면 400 INSUFFICIENT_AVAILABLE
-    max_by_margin = max(1, int(balance * MAX_LEVERAGE / (QUANTO * last_price)))
-    contracts    = min(contracts, max_by_margin)
-    notional     = contracts * QUANTO * last_price
-    leverage     = max(1, min(math.ceil(notional / balance), MAX_LEVERAGE))
-    return contracts, leverage
+def calc_entry(last_price: float) -> tuple:
+    """고정 $100 / 1배율 — 계약수 반환."""
+    contracts = max(1, int(RISK_USDT / (QUANTO * last_price)))
+    return contracts, LEVERAGE
 
 
 # ── 포지션 ────────────────────────────────────────────────────────────
@@ -311,12 +304,11 @@ class CandleReversalTrader:
             logger.warning(f"포지션 조회 실패: {e}")
             return
 
-        # 잔고 + 현재가
+        # 현재가
         try:
-            balance    = get_balance(self.api)
             last_price = get_last_price(self.api)
         except Exception as e:
-            logger.warning(f"잔고/시세 조회 실패: {e}")
+            logger.warning(f"시세 조회 실패: {e}")
             return
 
         sig_bar  = df.iloc[-1]
@@ -328,24 +320,19 @@ class CandleReversalTrader:
 
         tp_price  = (last_price - sl_dist * RR_RATIO if signal == "short"
                      else last_price + sl_dist * RR_RATIO)
-        contracts, leverage = calc_entry(balance, sl_dist, last_price)
+        contracts, leverage = calc_entry(last_price)
 
-        # 레버리지 동적 설정
+        # 레버리지 1x 설정
         try:
             self.api.update_position_leverage(
                 settle=SETTLE, contract=CONTRACT, leverage=str(leverage))
-            logger.info(f"레버리지 {leverage}x 설정")
         except Exception as e:
-            body = getattr(e, 'body', None) or str(e)
             logger.warning(f"레버리지 설정 실패: {e}")
-            if leverage > 1:
-                tg.send_error(f"레버리지 설정 실패로 진입 취소({getattr(e,'status','?')}): {str(body)[:200]}")
-                return
 
         logger.info(
             f"신호: {signal.upper()} | last≈{last_price:.1f} "
             f"sl={sl_price:.1f} tp={tp_price:.1f} | "
-            f"contracts={contracts} lev={leverage}x risk≈{RISK_PCT*100:.1f}%"
+            f"contracts={contracts} lev=1x bet=$100"
         )
 
         self._last_sig_ts = sig_ts
@@ -399,7 +386,12 @@ class CandleReversalTrader:
             contracts=actual_contracts, entry_ts=datetime.now(timezone.utc),
             sl_id=sl_id, tp_id=tp_id,
         )
-        risk_usdt = balance * RISK_PCT
+        try:
+            balance = get_balance(self.api)
+        except Exception:
+            balance = 0.0
+        sl_dist_actual = abs(entry_price - sl_price)
+        risk_usdt = actual_contracts * QUANTO * sl_dist_actual
         tg.send_entry(
             side=signal, entry=entry_price, sl=sl_price, tp=tp_price,
             risk_usdt=risk_usdt, tp_usdt=risk_usdt * RR_RATIO,
@@ -513,11 +505,7 @@ class CandleReversalTrader:
             sl_dist   = abs(pos.entry_price - pos.sl)
             risk_usdt = pos.contracts * QUANTO * sl_dist
         else:
-            # 재시작으로 복원된 포지션 — SL 거리 불명, 잔고 기반 추정
-            try:
-                risk_usdt = get_balance(self.api) * RISK_PCT
-            except Exception:
-                risk_usdt = 10.0
+            risk_usdt = RISK_USDT
         r_unit = pnl / risk_usdt if risk_usdt > 0 else 0.0
 
         if pnl > 0:
@@ -574,7 +562,7 @@ class CandleReversalTrader:
             f"big={BIG_MULT} cover={COVER_PCT} rr={RR_RATIO} avg={AVG_LEN} | "
             f"risk={RISK_PCT*100:.1f}%"
         )
-        tg.send_startup(demo=DEMO, risk_pct=RISK_PCT * 100)
+        tg.send_startup(demo=DEMO, risk_pct=0.0)
 
         while True:
             try:
