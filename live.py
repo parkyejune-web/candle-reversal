@@ -246,9 +246,10 @@ class CandleReversalTrader:
                 settle=SETTLE, contract=CONTRACT, leverage=str(leverage))
             logger.info(f"레버리지 {leverage}x 설정")
         except Exception as e:
+            body = getattr(e, 'body', None) or str(e)
             logger.warning(f"레버리지 설정 실패: {e}")
             if leverage > 1:
-                tg.send_error(f"레버리지 설정 실패로 진입 취소: {e}")
+                tg.send_error(f"레버리지 설정 실패로 진입 취소({getattr(e,'status','?')}): {str(body)[:200]}")
                 return
 
         logger.info(
@@ -272,8 +273,10 @@ class CandleReversalTrader:
                 )
             )
         except Exception as e:
-            logger.error(f"주문 실패: {e}")
-            tg.send_error(str(e)[:300])
+            body = getattr(e, 'body', None) or ''
+            status = getattr(e, 'status', '?')
+            logger.error(f"주문 실패({status}): {body or e}")
+            tg.send_error(f"주문실패({status})\n{str(body)[:250] or str(e)[:250]}")
             return
 
         # 체결 확인 (3초 대기)
@@ -306,9 +309,10 @@ class CandleReversalTrader:
             contracts=actual_contracts, entry_ts=datetime.now(timezone.utc),
             sl_id=sl_id, tp_id=tp_id,
         )
+        risk_usdt = balance * RISK_PCT
         tg.send_entry(
             side=signal, entry=entry_price, sl=sl_price, tp=tp_price,
-            contracts=actual_contracts, risk_pct=RISK_PCT * 100,
+            risk_usdt=risk_usdt, tp_usdt=risk_usdt * RR_RATIO,
             balance=balance, stats=self._stats(),
         )
 
@@ -322,6 +326,10 @@ class CandleReversalTrader:
 
         sl_id = tp_id = None
         for label, price, rule in [("SL", sl_price, sl_rule), ("TP", tp_price, tp_rule)]:
+            # SL: market(IOC) — speed over fill quality
+            # TP: limit(GTC) — fill at tp_price or better, no slippage
+            order_price = "0"            if label == "SL" else f"{price:.1f}"
+            order_tif   = "ioc"          if label == "SL" else "gtc"
             try:
                 result = self.api.create_price_triggered_order(
                     settle=SETTLE,
@@ -329,8 +337,8 @@ class CandleReversalTrader:
                         initial=FuturesInitialOrder(
                             contract=CONTRACT,
                             size=close_size,
-                            price="0",
-                            tif="ioc",
+                            price=order_price,
+                            tif=order_tif,
                             reduce_only=True,
                             text=f"t-cr-{label.lower()}",
                         ),
@@ -426,7 +434,7 @@ class CandleReversalTrader:
 
         logger.info(f"청산: {status}  R={r_unit:+.2f}")
         tg.send_exit(status=status, side=pos.side, entry=pos.entry_price,
-                     r_unit=r_unit, stats=self._stats())
+                     pnl_usdt=pnl, r_unit=r_unit, stats=self._stats())
         self.pos = None
 
     def _force_close(self) -> None:
@@ -481,8 +489,11 @@ class CandleReversalTrader:
                 tg.send_shutdown()
                 break
             except Exception as e:
+                body = getattr(e, 'body', None) or ''
+                status = getattr(e, 'status', '')
+                prefix = f"({status}) " if status else ""
                 logger.error(f"루프 에러: {e}", exc_info=True)
-                tg.send_error(str(e)[:300])
+                tg.send_error(f"{prefix}{str(body)[:250] or str(e)[:250]}")
 
             time.sleep(POLL_SEC)
 

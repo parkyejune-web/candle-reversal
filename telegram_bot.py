@@ -41,39 +41,41 @@ def send_startup(demo: bool, risk_pct: float) -> None:
 
 
 def send_entry(side: str, entry: float, sl: float, tp: float,
-               contracts: int, risk_pct: float, balance: float,
-               stats: dict) -> None:
-    emoji = "🔴 SHORT" if side == "short" else "🟢 LONG"
-    wr    = stats["winrate"]
-    w, l  = stats["wins"], stats["losses"]
+               risk_usdt: float, tp_usdt: float,
+               balance: float, stats: dict) -> None:
+    emoji  = "🔴 숏 (SHORT)" if side == "short" else "🟢 롱 (LONG)"
+    rr     = tp_usdt / risk_usdt if risk_usdt else 0
+    w, l   = stats["wins"], stats["losses"]
+    wr     = stats["winrate"]
     _send(
-        f"{emoji} 진입\n"
-        f"▸ Entry  <code>{entry:.1f}</code>\n"
-        f"▸ SL     <code>{sl:.1f}</code>\n"
-        f"▸ TP     <code>{tp:.1f}</code>\n"
-        f"▸ 계약수 {contracts}  리스크 {risk_pct:.1f}%\n"
-        f"▸ 잔고   ${balance:,.0f}\n"
-        f"▸ 성과   {w}승 {l}패  WR {wr:.1f}%\n"
-        f"▸ {_now_kst()} KST"
+        f"{emoji} 진입: BTC_USDT\n\n"
+        f"진입가: <code>${entry:,.1f}</code>\n"
+        f"손절가: <code>${sl:,.1f}</code>  (여기 오면 -${risk_usdt:.2f})\n"
+        f"목표가: <code>${tp:,.1f}</code>  (여기 오면 +${tp_usdt:.2f}, RR {rr:.1f})\n\n"
+        f"💰 잔고: ${balance:,.2f}\n"
+        f"📊 누적: {w}승 {l}패  ({wr:.1f}%)\n"
+        f"시각: {_now_kst()} KST"
     )
 
 
 def send_exit(status: str, side: str, entry: float,
-              r_unit: float, stats: dict) -> None:
+              pnl_usdt: float, r_unit: float, stats: dict) -> None:
     if status == "WIN":
-        emoji = "✅ WIN"
+        emoji = "✅ 익절"
     elif status == "LOSS":
-        emoji = "❌ LOSS"
+        emoji = "💥 손절"
     else:
-        emoji = "➖ EVEN"
-    dir_str = "SHORT" if side == "short" else "LONG"
-    wr = stats["winrate"]
-    w, l = stats["wins"], stats["losses"]
+        emoji = "➖ 본전"
+    direction = "숏" if side == "short" else "롱"
+    sign      = "+" if pnl_usdt >= 0 else ""
+    w, l      = stats["wins"], stats["losses"]
+    wr        = stats["winrate"]
     _send(
-        f"{emoji}  {dir_str} {r_unit:+.2f}R\n"
-        f"▸ Entry  <code>{entry:.1f}</code>\n"
-        f"▸ 누적   {w}승 {l}패  WR {wr:.1f}%\n"
-        f"▸ {_now_kst()} KST"
+        f"{emoji}: BTC_USDT {direction}\n\n"
+        f"진입가: <code>${entry:,.1f}</code>\n"
+        f"실현 손익: {sign}${pnl_usdt:.2f}  ({sign}{r_unit:.2f}R)\n\n"
+        f"📊 누적: {w}승 {l}패  ({wr:.1f}%)\n"
+        f"시각: {_now_kst()} KST"
     )
 
 
