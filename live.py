@@ -178,6 +178,16 @@ class CandleReversalTrader:
         self._recover_position()
 
     def _load_stats(self) -> dict:
+        """Gate.io 청산 이력에서 승/패 집계 — 재배포해도 통계 유지."""
+        try:
+            closes = self.api.list_position_close(
+                settle=SETTLE, contract=CONTRACT, limit=1000)
+            wins   = sum(1 for c in closes if float(c.pnl or 0) > 0)
+            losses = sum(1 for c in closes if float(c.pnl or 0) < 0)
+            logger.info(f"통계 복원 (Gate.io): {wins}승 {losses}패")
+            return {"wins": wins, "losses": losses}
+        except Exception as e:
+            logger.warning(f"통계 API 조회 실패, 파일 폴백: {e}")
         try:
             with open(STATS_FILE) as f:
                 d = json.load(f)
@@ -322,6 +332,21 @@ class CandleReversalTrader:
                      else last_price + sl_dist * RR_RATIO)
         contracts, leverage = calc_entry(last_price)
 
+        # 마진 사전 검증 — 1x이므로 필요마진 = 노셔널
+        required_margin = contracts * QUANTO * last_price
+        try:
+            available = get_balance(self.api)
+        except Exception as e:
+            logger.warning(f"잔고 조회 실패: {e}")
+            return
+        if available < required_margin * 1.1:
+            logger.warning(
+                f"마진 부족 — 진입 취소 "
+                f"(필요 ${required_margin:.1f} × 1.1 = ${required_margin*1.1:.1f}, "
+                f"가용 ${available:.1f})"
+            )
+            return
+
         # 레버리지 1x 설정
         try:
             self.api.update_position_leverage(
@@ -332,7 +357,7 @@ class CandleReversalTrader:
         logger.info(
             f"신호: {signal.upper()} | last≈{last_price:.1f} "
             f"sl={sl_price:.1f} tp={tp_price:.1f} | "
-            f"contracts={contracts} lev=1x bet=$100"
+            f"contracts={contracts} lev=1x bet=$100 margin≈${required_margin:.1f}"
         )
 
         self._last_sig_ts = sig_ts
@@ -560,7 +585,7 @@ class CandleReversalTrader:
         logger.info(
             f"Candle-Reversal 시작 | {'DEMO' if DEMO else 'LIVE'} | "
             f"big={BIG_MULT} cover={COVER_PCT} rr={RR_RATIO} avg={AVG_LEN} | "
-            f"risk={RISK_PCT*100:.1f}%"
+            f"고정 ${RISK_USDT:.0f} / {LEVERAGE}x"
         )
         tg.send_startup(demo=DEMO, risk_pct=0.0)
 
