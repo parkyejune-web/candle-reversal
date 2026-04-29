@@ -43,10 +43,10 @@ def send_startup(demo: bool, risk_pct: float) -> None:
 def send_entry(side: str, entry: float, sl: float, tp: float,
                risk_usdt: float, tp_usdt: float,
                balance: float, stats: dict) -> None:
-    emoji  = "🔴 숏 (SHORT)" if side == "short" else "🟢 롱 (LONG)"
-    rr     = tp_usdt / risk_usdt if risk_usdt else 0
-    w, l   = stats["wins"], stats["losses"]
-    wr     = stats["winrate"]
+    emoji    = "🔴 숏 (SHORT)" if side == "short" else "🟢 롱 (LONG)"
+    rr       = tp_usdt / risk_usdt if risk_usdt else 0
+    w, l     = stats["wins"], stats["losses"]
+    wr       = stats["winrate"]
     _send(
         f"{emoji} 진입: BTC_USDT\n\n"
         f"진입가: <code>${entry:,.1f}</code>\n"
@@ -59,22 +59,26 @@ def send_entry(side: str, entry: float, sl: float, tp: float,
 
 
 def send_exit(status: str, side: str, entry: float,
-              pnl_usdt: float, r_unit: float, stats: dict) -> None:
+              pnl_usdt: float, r_unit: float, balance: float, stats: dict) -> None:
     if status == "WIN":
         emoji = "✅ 익절"
     elif status == "LOSS":
         emoji = "💥 손절"
     else:
         emoji = "➖ 본전"
-    direction = "숏" if side == "short" else "롱"
-    sign      = "+" if pnl_usdt >= 0 else ""
-    w, l      = stats["wins"], stats["losses"]
-    wr        = stats["winrate"]
+    direction  = "숏" if side == "short" else "롱"
+    sign       = "+" if pnl_usdt >= 0 else ""
+    w, l       = stats["wins"], stats["losses"]
+    wr         = stats["winrate"]
+    tp  = stats.get("total_profit", 0.0)
+    tl  = stats.get("total_loss", 0.0)
     _send(
         f"{emoji}: BTC_USDT {direction}\n\n"
         f"진입가: <code>${entry:,.1f}</code>\n"
         f"실현 손익: {sign}${pnl_usdt:.2f}  ({sign}{r_unit:.2f}R)\n\n"
+        f"💰 잔고: ${balance:,.2f}\n"
         f"📊 누적: {w}승 {l}패  ({wr:.1f}%)\n"
+        f"💹 총 수익: +${tp:.2f}  |  총 손실: -${abs(tl):.2f}\n"
         f"시각: {_now_kst()} KST"
     )
 

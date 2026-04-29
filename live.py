@@ -123,7 +123,7 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
 
 # ── 유틸 ──────────────────────────────────────────────────────────────
 def get_balance(api: FuturesApi) -> float:
-    return float(api.list_futures_accounts(settle=SETTLE).available)
+    return float(api.list_futures_accounts(settle=SETTLE).total)
 
 
 def get_position_size(api: FuturesApi) -> int:
@@ -172,33 +172,49 @@ class CandleReversalTrader:
         self.pos: Optional[Position] = None
         self._last_sig_ts: Optional[int] = self._load_sig_ts()
         stats = self._load_stats()
-        self._wins    = stats["wins"]
-        self._losses  = stats["losses"]
+        self._wins         = stats["wins"]
+        self._losses       = stats["losses"]
+        self._total_profit = stats["total_profit"]
+        self._total_loss   = stats["total_loss"]
         self._daily_date: Optional[str] = None
         self._recover_position()
 
     def _load_stats(self) -> dict:
-        """Gate.io 청산 이력에서 승/패 집계 — 재배포해도 통계 유지."""
+        """Gate.io 청산 이력에서 승/패 + PnL 집계 — 재배포해도 통계 유지."""
         try:
             closes = self.api.list_position_close(
                 settle=SETTLE, contract=CONTRACT, limit=1000)
-            wins   = sum(1 for c in closes if float(c.pnl or 0) > 0)
-            losses = sum(1 for c in closes if float(c.pnl or 0) < 0)
-            logger.info(f"통계 복원 (Gate.io): {wins}승 {losses}패")
-            return {"wins": wins, "losses": losses}
+            wins         = sum(1 for c in closes if float(c.pnl or 0) > 0)
+            losses       = sum(1 for c in closes if float(c.pnl or 0) < 0)
+            total_profit = sum(float(c.pnl or 0) for c in closes if float(c.pnl or 0) > 0)
+            total_loss   = sum(float(c.pnl or 0) for c in closes if float(c.pnl or 0) < 0)
+            logger.info(f"통계 복원 (Gate.io): {wins}승 {losses}패  "
+                        f"수익 ${total_profit:.2f}  손실 ${total_loss:.2f}")
+            return {"wins": wins, "losses": losses,
+                    "total_profit": total_profit, "total_loss": total_loss}
         except Exception as e:
             logger.warning(f"통계 API 조회 실패, 파일 폴백: {e}")
         try:
             with open(STATS_FILE) as f:
                 d = json.load(f)
-                return {"wins": int(d.get("wins", 0)), "losses": int(d.get("losses", 0))}
+                return {
+                    "wins":         int(d.get("wins", 0)),
+                    "losses":       int(d.get("losses", 0)),
+                    "total_profit": float(d.get("total_profit", 0.0)),
+                    "total_loss":   float(d.get("total_loss", 0.0)),
+                }
         except Exception:
-            return {"wins": 0, "losses": 0}
+            return {"wins": 0, "losses": 0, "total_profit": 0.0, "total_loss": 0.0}
 
     def _save_stats(self) -> None:
         try:
             with open(STATS_FILE, "w") as f:
-                json.dump({"wins": self._wins, "losses": self._losses}, f)
+                json.dump({
+                    "wins":         self._wins,
+                    "losses":       self._losses,
+                    "total_profit": self._total_profit,
+                    "total_loss":   self._total_loss,
+                }, f)
         except Exception as e:
             logger.warning(f"stats 저장 실패: {e}")
 
@@ -288,8 +304,14 @@ class CandleReversalTrader:
 
     def _stats(self) -> dict:
         t = self._wins + self._losses
-        return {"wins": self._wins, "losses": self._losses,
-                "winrate": self._wins / t * 100 if t else 0.0}
+        return {
+            "wins":         self._wins,
+            "losses":       self._losses,
+            "winrate":      self._wins / t * 100 if t else 0.0,
+            "total_profit": self._total_profit,
+            "total_loss":   self._total_loss,
+            "cum_pnl":      self._total_profit + self._total_loss,
+        }
 
     # ── 진입 ─────────────────────────────────────────────────────────
     def try_enter(self, df: pd.DataFrame) -> None:
@@ -535,17 +557,24 @@ class CandleReversalTrader:
 
         if pnl > 0:
             self._wins += 1
+            self._total_profit += pnl
             status = "WIN"
         elif pnl < 0:
             self._losses += 1
+            self._total_loss += pnl
             status = "LOSS"
         else:
             status = "EVEN"
         self._save_stats()
 
-        logger.info(f"청산: {status}  R={r_unit:+.2f}")
+        try:
+            balance = get_balance(self.api)
+        except Exception:
+            balance = 0.0
+
+        logger.info(f"청산: {status}  R={r_unit:+.2f}  잔고=${balance:.2f}")
         tg.send_exit(status=status, side=pos.side, entry=pos.entry_price,
-                     pnl_usdt=pnl, r_unit=r_unit, stats=self._stats())
+                     pnl_usdt=pnl, r_unit=r_unit, balance=balance, stats=self._stats())
         self.pos = None
 
     def _force_close(self) -> None:
