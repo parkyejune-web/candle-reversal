@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/일대백/**)",
+      "Read(//d/super-ant-quant/**)",
+      "Bash(python *)",
+      "Bash(tasklist)",
+      "Bash(taskkill /PID 14140 /F)",
+      "Bash(taskkill /PID 16548 /F)",
+      "PowerShell(Stop-Process *)",
+      "Bash(pip install *)",
+      "Bash(dir \"D:\\\\candle-reversal\")",
+      "Bash(findstr \"xlsx\")",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(gh --version)",
+      "Bash(git config *)",
+      "Bash(gh auth *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(gh repo *)",
+      "Bash(git push *)",
+      "Bash(mkdir -p /d/candle-reversal-30m)",
+      "Read(//d//**)",
+      "Bash(cp /d/candle-reversal/live_30m.py /d/candle-reversal-30m/)",
+      "Bash(cp /d/candle-reversal/telegram_bot.py /d/candle-reversal-30m/)",
+      "Bash(cp /d/candle-reversal/requirements.txt /d/candle-reversal-30m/)",
+      "Bash(cp /d/candle-reversal/.gitignore /d/candle-reversal-30m/)"
+    ]
+  }
+}
