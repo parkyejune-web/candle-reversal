@@ -25,6 +25,20 @@ def _send(text: str) -> None:
         logger.warning(f"TG 전송 실패: {e}")
 
 
+def send_photo(image_bytes: bytes, caption: str = "") -> None:
+    if not _TOKEN or not _CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{_TOKEN}/sendPhoto",
+            data={"chat_id": _CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": ("chart.png", image_bytes, "image/png")},
+            timeout=20,
+        )
+    except Exception as e:
+        logger.warning(f"TG 사진 전송 실패: {e}")
+
+
 def _now_kst() -> str:
     return datetime.now(KST).strftime("%m/%d %H:%M")
 

@@ -1,50 +1,46 @@
 """
-장대봉 + 반대봉 역추세 전략 — 파라미터 최적화 + OOS 검증
-IS: 2024  OOS: 2025  심볼: BTCUSDT 1분봉
-수수료 모델: 진입·TP=지정가maker(+0.015% 리베이트), SL=시장가taker(-0.050%)
-실행: python backtest.py
+장대봉 + 반대봉 역추세 전략 — 3분/5분봉 멀티 타임프레임 백테스트
+IS: 2024  OOS: 2025  심볼: BTCUSDT
+수수료: 진입·TP=지정가maker(+0.015%), SL=시장가taker(-0.050%)
+실행: python backtest_tf.py
 """
-import io
-import time as time_mod
-import zipfile
+import io, time as time_mod, zipfile, os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import product
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import requests
-from pathlib import Path
-from itertools import product
 
 CACHE_DIR  = Path("cache")
 CACHE_DIR.mkdir(exist_ok=True)
 SYMBOL     = "BTCUSDT"
 MIN_TRADES = 30
 
-# ── 수수료 모델 (Gate.io) ─────────────────────────────────────────────
-MAKER_REBATE = 0.00015   # 지정가 체결 시 받는 리베이트 0.015%
-TAKER_COST   = 0.00050   # 시장가 체결 시 내는 수수료 0.050%
+MAKER_REBATE = 0.00015
+TAKER_COST   = 0.00050
 
-# ── 파라미터 그리드 ───────────────────────────────────────────────────
 PARAM_GRID = {
     "big_mult":    [1.2, 1.5, 1.8, 2.0, 2.5, 3.0],
     "cover_pct":   [0.3, 0.4, 0.5, 0.6, 0.7],
     "rr_ratio":    [1.5, 2.0, 2.5, 3.0, 3.5],
     "avg_len":     [10, 15, 20, 30],
-    "min_sl_dist": [0, 30, 50, 70, 100, 150],   # 최소 SL 거리 ($) 필터
+    "min_sl_dist": [0, 50, 100, 150, 200, 300],
 }
 # 조합 수: 6×5×5×4×6 = 3,600
 
 
-# ── 데이터 다운로드 (Binance bulk zip) ───────────────────────────────
+# ── 데이터 ────────────────────────────────────────────────────────────
 _BASE = "https://data.binance.vision/data/spot/monthly/klines"
 
-def _fetch_month(symbol: str, year: int, month: int) -> pd.DataFrame:
+def _fetch_month(symbol, year, month):
     fname = f"{symbol}-1m-{year}-{month:02d}"
     url   = f"{_BASE}/{symbol}/1m/{fname}.zip"
     r = requests.get(url, timeout=60)
     r.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        csv_name = z.namelist()[0]
-        with z.open(csv_name) as f:
+        with z.open(z.namelist()[0]) as f:
             df = pd.read_csv(f, header=None,
                              names=["ts","open","high","low","close","volume",
                                     "close_ts","qvol","ntrades","tb","tq","ign"],
@@ -57,7 +53,7 @@ def _fetch_month(symbol: str, year: int, month: int) -> pd.DataFrame:
     df["ts"] = pd.to_datetime(ts_vals, unit=unit, utc=True)
     return df
 
-def download_1m(symbol: str, start_year: int, end_year: int) -> pd.DataFrame:
+def load_1m(symbol, start_year, end_year):
     cache = CACHE_DIR / f"{symbol}_1m_{start_year}_{end_year}.parquet"
     if cache.exists():
         print(f"캐시 로드: {cache}")
@@ -65,13 +61,12 @@ def download_1m(symbol: str, start_year: int, end_year: int) -> pd.DataFrame:
         print(f"  {len(df):,}봉")
         return df
 
-    import calendar
-    today = pd.Timestamp.now()
+    today  = pd.Timestamp.now()
     months = [(y, m) for y in range(start_year, end_year + 1)
               for m in range(1, 13)
               if pd.Timestamp(year=y, month=m, day=1) < today]
 
-    print(f"Binance bulk 다운로드: {symbol} 1m {start_year}~{end_year} ({len(months)}개월)")
+    print(f"Binance 다운로드: {symbol} 1m {start_year}~{end_year} ({len(months)}개월)")
     frames = []
     for i, (y, m) in enumerate(months, 1):
         print(f"  [{i}/{len(months)}] {y}-{m:02d}...", end=" ", flush=True)
@@ -83,7 +78,7 @@ def download_1m(symbol: str, start_year: int, end_year: int) -> pd.DataFrame:
             print(f"SKIP ({e})")
 
     if not frames:
-        raise RuntimeError(f"다운로드 실패: {symbol} {start_year}~{end_year} 데이터 없음")
+        raise RuntimeError("데이터 없음")
     df = pd.concat(frames, ignore_index=True)
     df = df.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
     df.to_parquet(cache)
@@ -91,9 +86,22 @@ def download_1m(symbol: str, start_year: int, end_year: int) -> pd.DataFrame:
     return df
 
 
-# ── 신호 감지 (벡터화) ────────────────────────────────────────────────
-def detect_signals(df: pd.DataFrame, big_mult: float,
-                   cover_pct: float, avg_len: int):
+def resample(df_1m, minutes):
+    """1분봉 → N분봉 리샘플링."""
+    df = df_1m.set_index("ts")
+    rule = f"{minutes}min"
+    rs = df.resample(rule).agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).dropna().reset_index().rename(columns={"ts": "ts"})
+    return rs
+
+
+# ── 신호 감지 ─────────────────────────────────────────────────────────
+def detect_signals(df, big_mult, cover_pct, avg_len):
     close = df["close"].values
     open_ = df["open"].values
     high  = df["high"].values
@@ -107,33 +115,26 @@ def detect_signals(df: pd.DataFrame, big_mult: float,
     is_bull = close > open_
     is_bear = close < open_
 
-    prev_top  = np.maximum(open_[:-1], close[:-1])
-    prev_bot  = np.minimum(open_[:-1], close[:-1])
-    curr_top  = np.maximum(open_[1:],  close[1:])
-    curr_bot  = np.minimum(open_[1:],  close[1:])
-    prev_body = body[:-1]
+    prev_top = np.maximum(open_[:-1], close[:-1])
+    prev_bot = np.minimum(open_[:-1], close[:-1])
+    curr_top = np.maximum(open_[1:],  close[1:])
+    curr_bot = np.minimum(open_[1:],  close[1:])
+    prev_body_arr = body[:-1]
 
     overlap = np.minimum(prev_top, curr_top) - np.maximum(prev_bot, curr_bot)
-    cover   = np.where(prev_body > 0, overlap / prev_body, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cover = np.where(prev_body_arr > 0, overlap / prev_body_arr, 0.0)
 
     short_sig = np.zeros(n, dtype=bool)
     long_sig  = np.zeros(n, dtype=bool)
     short_sig[1:] = is_big[:-1] & is_bull[:-1] & is_bear[1:] & (cover >= cover_pct)
     long_sig[1:]  = is_big[:-1] & is_bear[:-1] & is_bull[1:] & (cover >= cover_pct)
-
     return short_sig, long_sig
 
 
-# ── 백테스트 (수수료 포함) ────────────────────────────────────────────
-def run_backtest(df: pd.DataFrame, short_sig, long_sig,
-                 rr_ratio: float, min_sl_dist: float = 0.0,
-                 max_bars: int = 1440) -> dict:
-    """
-    수수료 모델:
-      진입: 지정가 GTC → MAKER_REBATE (받음)
-      TP  : 지정가 GTC → MAKER_REBATE (받음)
-      SL  : 시장가 IOC → TAKER_COST  (냄)
-    """
+# ── 백테스트 ─────────────────────────────────────────────────────────
+def run_backtest(df, short_sig, long_sig, rr_ratio,
+                 min_sl_dist=0.0, max_bars=1440):
     high  = df["high"].values
     low   = df["low"].values
     open_ = df["open"].values
@@ -168,11 +169,9 @@ def run_backtest(df: pd.DataFrame, short_sig, long_sig,
         tp_price = (entry_price - sl_dist * rr_ratio if side == "short"
                     else entry_price + sl_dist * rr_ratio)
 
-        # 레버리지 팩터: 노셔널/리스크 = 진입가/SL거리
-        lev = entry_price / sl_dist
-        # 수수료 (R 단위)
-        fee_win  = (MAKER_REBATE + MAKER_REBATE) * lev   # 진입maker + TP maker (양수)
-        fee_loss = (MAKER_REBATE - TAKER_COST  ) * lev   # 진입maker - SL taker (음수)
+        lev      = entry_price / sl_dist
+        fee_win  = (MAKER_REBATE + MAKER_REBATE) * lev
+        fee_loss = (MAKER_REBATE - TAKER_COST)   * lev
 
         found = False
         for j in range(i + 1, min(i + max_bars + 1, n)):
@@ -199,15 +198,14 @@ def run_backtest(df: pd.DataFrame, short_sig, long_sig,
 
         if not found:
             j = min(i + max_bars, n - 1)
-            exit_price = close[j]
-            r_raw = ((entry_price - exit_price) / sl_dist if side == "short"
-                     else (exit_price - entry_price) / sl_dist)
-            r = r_raw + fee_loss   # 강제청산 = 시장가 taker
-            results_r.append(r)
+            r_raw = ((entry_price - close[j]) / sl_dist if side == "short"
+                     else (close[j] - entry_price) / sl_dist)
+            results_r.append(r_raw + fee_loss)
             exit_idx = j
 
     if not results_r:
-        return {"trades": 0, "win_rate": 0.0, "expectancy": 0.0, "total_r": 0.0, "mdd_r": 0.0}
+        return {"trades": 0, "win_rate": 0.0, "expectancy": 0.0,
+                "total_r": 0.0, "mdd_r": 0.0}
 
     arr  = np.array(results_r)
     wins = (arr > 0).sum()
@@ -223,28 +221,27 @@ def run_backtest(df: pd.DataFrame, short_sig, long_sig,
     }
 
 
-# ── 그리드 서치 (멀티프로세싱) ───────────────────────────────────────
+# ── 그리드 서치 ───────────────────────────────────────────────────────
 def _run_combo(args):
-    df, params = args
+    df, params, max_bars = args
     short_sig, long_sig = detect_signals(
         df, params["big_mult"], params["cover_pct"], params["avg_len"])
     res = run_backtest(df, short_sig, long_sig,
-                       params["rr_ratio"], params["min_sl_dist"])
+                       params["rr_ratio"], params["min_sl_dist"], max_bars)
     if res["trades"] >= MIN_TRADES:
         return {**params, **res}
     return None
 
-def grid_search(df: pd.DataFrame, param_grid: dict) -> pd.DataFrame:
+def grid_search(df, param_grid, max_bars, label=""):
     keys   = list(param_grid.keys())
     combos = list(product(*param_grid.values()))
     total  = len(combos)
-    print(f"파라미터 조합: {total}개")
+    print(f"{label} 파라미터 조합: {total}개  max_bars={max_bars}")
 
-    args = [(df, dict(zip(keys, c))) for c in combos]
+    args = [(df, dict(zip(keys, c)), max_bars) for c in combos]
     records = []
     t0 = time_mod.time()
 
-    import os
     workers = min(os.cpu_count() or 4, 8)
     with ProcessPoolExecutor(max_workers=workers) as exe:
         futures = {exe.submit(_run_combo, a): i for i, a in enumerate(args)}
@@ -254,38 +251,36 @@ def grid_search(df: pd.DataFrame, param_grid: dict) -> pd.DataFrame:
             try:
                 res = fut.result()
             except Exception as e:
-                print(f"  [경고] 조합 오류: {e}")
+                print(f"  [경고] {e}")
                 continue
             if res:
                 records.append(res)
-            if done % 300 == 0:
+            if done % 600 == 0:
                 elapsed = time_mod.time() - t0
                 eta = elapsed / done * (total - done)
                 print(f"  {done}/{total}  경과 {elapsed:.0f}s  ETA {eta:.0f}s")
 
     if not records:
         return pd.DataFrame()
-    result_df = pd.DataFrame(records).sort_values("expectancy", ascending=False)
-    return result_df
+    return pd.DataFrame(records).sort_values("expectancy", ascending=False)
 
 
-# ── OOS 검증 ─────────────────────────────────────────────────────────
-def validate_oos(df_oos: pd.DataFrame, is_top: pd.DataFrame, n: int = 10) -> pd.DataFrame:
+def validate_oos(df_oos, is_top, n=10, max_bars=1440):
     records = []
     for _, row in is_top.head(n).iterrows():
         short_sig, long_sig = detect_signals(
             df_oos, row["big_mult"], row["cover_pct"], row["avg_len"])
         res = run_backtest(df_oos, short_sig, long_sig,
-                           row["rr_ratio"], row["min_sl_dist"])
+                           row["rr_ratio"], row["min_sl_dist"], max_bars)
         records.append({
             "big_mult":    row["big_mult"],
             "cover_pct":   row["cover_pct"],
             "rr_ratio":    row["rr_ratio"],
             "avg_len":     int(row["avg_len"]),
             "min_sl_dist": int(row["min_sl_dist"]),
+            "IS_exp":      round(row["expectancy"], 3),
             "IS_trades":   int(row["trades"]),
             "IS_wr":       round(row["win_rate"], 1),
-            "IS_exp":      round(row["expectancy"], 3),
             "IS_mdd_r":    round(row["mdd_r"], 1),
             "OOS_trades":  res["trades"],
             "OOS_wr":      round(res["win_rate"], 1),
@@ -298,54 +293,54 @@ def validate_oos(df_oos: pd.DataFrame, is_top: pd.DataFrame, n: int = 10) -> pd.
 
 # ── 메인 ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("수수료 모델: 진입·TP=지정가maker(+0.015%), SL=시장가taker(-0.050%)")
+    print("수수료: 진입·TP=지정가maker(+0.015%), SL=시장가taker(-0.050%)")
     print()
 
-    df_all = download_1m(SYMBOL, 2024, 2025)
-    df_is  = df_all[df_all["ts"].dt.year == 2024].reset_index(drop=True)
-    df_oos = df_all[df_all["ts"].dt.year == 2025].reset_index(drop=True)
-    print(f"\nIS  2024: {len(df_is):,}봉")
-    print(f"OOS 2025: {len(df_oos):,}봉\n")
+    df_1m = load_1m(SYMBOL, 2024, 2025)
 
-    print("=" * 60)
-    print("[IS 2024] 그리드 서치 시작 (수수료 포함)...")
-    print("=" * 60)
-    t0      = time_mod.time()
-    is_df   = grid_search(df_is, PARAM_GRID)
-    elapsed = time_mod.time() - t0
-    print(f"\n완료: {elapsed:.1f}초  유효 조합: {len(is_df)}개\n")
+    for tf_min in [3, 5]:
+        print(f"\n{'='*65}")
+        print(f"  타임프레임: {tf_min}분봉")
+        print(f"{'='*65}")
 
-    if is_df.empty:
-        print("IS 유효 조합 없음")
-        exit(1)
+        df_tf  = resample(df_1m, tf_min)
+        df_is  = df_tf[df_tf["ts"].dt.year == 2024].reset_index(drop=True)
+        df_oos = df_tf[df_tf["ts"].dt.year == 2025].reset_index(drop=True)
 
-    print("=== IS 2024 상위 10개 (수수료 포함 expectancy 기준) ===")
-    print(is_df.head(10).to_string(index=False))
-    is_df.to_csv("is_results.csv", index=False)
+        # max_bars: 24시간을 해당 TF 봉 수로
+        max_bars = 1440 // tf_min
 
-    if len(df_oos) == 0:
-        print("OOS 데이터 없음")
-        exit(1)
+        print(f"IS  2024: {len(df_is):,}봉")
+        print(f"OOS 2025: {len(df_oos):,}봉")
+        print()
 
-    print("\n" + "=" * 60)
-    print("[OOS 2025] 상위 10개 검증...")
-    print("=" * 60)
-    oos_df = validate_oos(df_oos, is_df, n=10)
+        label = f"[{tf_min}m IS 2024]"
+        t0    = time_mod.time()
+        is_df = grid_search(df_is, PARAM_GRID, max_bars, label=label)
+        elapsed = time_mod.time() - t0
+        print(f"완료: {elapsed:.1f}초  유효 조합: {len(is_df)}개")
 
-    print("\n=== OOS 2025 결과 (수수료 포함) ===")
-    print(oos_df.to_string(index=False))
-    oos_df.to_csv("oos_results.csv", index=False)
+        if is_df.empty:
+            print("유효 조합 없음")
+            continue
 
-    print("\n결과 저장: is_results.csv / oos_results.csv")
+        print(f"\n=== {tf_min}m IS 2024 상위 15개 ===")
+        print(is_df.head(15).to_string(index=False))
+        is_df.to_csv(f"is_{tf_min}m.csv", index=False)
 
-    survivors = oos_df[oos_df["OOS_exp"] > 0]
-    if len(survivors) > 0:
-        best = survivors.iloc[0]
-        print(f"\n★ OOS 양수 조합 {len(survivors)}개")
-        print(f"  최고: big_mult={best['big_mult']} cover={best['cover_pct']}"
-              f" rr={best['rr_ratio']} avg={best['avg_len']}"
-              f" min_sl=${best['min_sl_dist']}"
-              f" → OOS exp={best['OOS_exp']}R / WR={best['OOS_wr']}%"
-              f" / {best['OOS_trades']}건")
-    else:
-        print("\n✗ 수수료 포함 OOS 양수 조합 없음 — 전략 재검토 필요")
+        print(f"\n=== {tf_min}m OOS 2025 검증 (IS 상위 20) ===")
+        oos_df = validate_oos(df_oos, is_df, n=20, max_bars=max_bars)
+        print(oos_df.to_string(index=False))
+        oos_df.to_csv(f"oos_{tf_min}m.csv", index=False)
+
+        survivors = oos_df[oos_df["OOS_exp"] > 0]
+        print(f"\nOOS 양수: {len(survivors)}/20")
+        if len(survivors):
+            best = survivors.iloc[0]
+            print(f"  최고: big={best['big_mult']} cover={best['cover_pct']}"
+                  f" rr={best['rr_ratio']} avg={best['avg_len']}"
+                  f" msl={best['min_sl_dist']}"
+                  f"  OOS exp={best['OOS_exp']}R  WR={best['OOS_wr']}%"
+                  f"  {best['OOS_trades']}건/년")
+
+    print("\n완료. 결과: is_3m.csv / oos_3m.csv / is_5m.csv / oos_5m.csv")

@@ -1,0 +1,75 @@
+//@version=6
+strategy("Candle Reversal", overlay=true)
+big_mult = input.float(2.4, "Big Candle Mult", minval=1.0, step=0.1)
+cover_pct = input.float(0.7, "Cover Ratio", minval=0.1, step=0.1)
+rr_ratio = input.float(4.3, "RR Ratio", minval=1.0, step=0.1)
+avg_len = input.int(13, "Avg Period", minval=5)
+risk_pct = input.float(1.0, "Risk Pct", minval=0.1, step=0.1)
+max_bars = input.int(1440, "Max Bars", minval=1)
+var float tp_price = na
+var float sl_price = na
+var int bars_held = 0
+body = math.abs(close - open)
+avg_body = ta.sma(body, avg_len)
+is_big1 = body[1] >= avg_body[1] * big_mult
+is_bull1 = close[1] > open[1]
+is_bear1 = close[1] < open[1]
+top1 = math.max(open[1], close[1])
+bot1 = math.min(open[1], close[1])
+top0 = math.max(open, close)
+bot0 = math.min(open, close)
+overlap = math.min(top1, top0) - math.max(bot1, bot0)
+cover = body[1] > 0 ? overlap / body[1] : 0.0
+short_sig = is_big1 and is_bull1 and (close < open) and cover >= cover_pct
+long_sig = is_big1 and is_bear1 and (close > open) and cover >= cover_pct
+no_pos = strategy.position_size == 0
+if strategy.position_size != 0
+    bars_held += 1
+else
+    bars_held := 0
+if short_sig and no_pos
+    sl_price := high
+    tp_price := na
+    qty = strategy.equity * risk_pct / 100 / math.max(high - close, 0.001)
+    strategy.entry("Short", strategy.short, qty=qty)
+if long_sig and no_pos
+    sl_price := low
+    tp_price := na
+    qty = strategy.equity * risk_pct / 100 / math.max(close - low, 0.001)
+    strategy.entry("Long", strategy.long, qty=qty)
+if strategy.position_size > 0 and na(tp_price)
+    sl_d = math.max(open - sl_price, 0.001)
+    tp_price := open + sl_d * rr_ratio
+if strategy.position_size < 0 and na(tp_price)
+    sl_d = math.max(sl_price - open, 0.001)
+    tp_price := open - sl_d * rr_ratio
+if strategy.position_size > 0 and not na(tp_price)
+    hit_sl = low <= sl_price
+    hit_tp = high >= tp_price
+    if hit_sl
+        strategy.close("Long", comment="SL")
+        tp_price := na
+    else if hit_tp
+        strategy.close("Long", comment="TP")
+        tp_price := na
+    else if bars_held >= max_bars
+        strategy.close("Long", comment="TO")
+        tp_price := na
+if strategy.position_size < 0 and not na(tp_price)
+    hit_sl = high >= sl_price
+    hit_tp = low <= tp_price
+    if hit_sl
+        strategy.close("Short", comment="SL")
+        tp_price := na
+    else if hit_tp
+        strategy.close("Short", comment="TP")
+        tp_price := na
+    else if bars_held >= max_bars
+        strategy.close("Short", comment="TO")
+        tp_price := na
+plotshape(short_sig and no_pos, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plotshape(long_sig and no_pos, title="Long", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small)
+bgcolor(short_sig and no_pos ? color.new(color.red, 92) : na)
+bgcolor(long_sig and no_pos ? color.new(color.lime, 92) : na)
+plot(strategy.position_size != 0 ? tp_price : na, "TP Line", color=color.green, linewidth=2)
+plot(strategy.position_size != 0 ? sl_price : na, "SL Line", color=color.red, linewidth=2)
