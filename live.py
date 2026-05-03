@@ -13,9 +13,13 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import io
 import json
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import gate_api
 from gate_api import ApiClient, Configuration
 from gate_api.api import FuturesApi
@@ -121,6 +125,119 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+# ── 차트 생성 ─────────────────────────────────────────────────────────
+def _draw_candles(ax, sub_df: pd.DataFrame) -> None:
+    for idx in range(len(sub_df)):
+        row = sub_df.iloc[idx]
+        up  = row["close"] >= row["open"]
+        col = "#26a69a" if up else "#ef5350"
+        ax.plot([idx, idx], [row["low"], row["high"]], color=col, linewidth=0.6, zorder=1)
+        bot = min(row["open"], row["close"])
+        ht  = max(abs(row["close"] - row["open"]), row["close"] * 0.00004)
+        ax.add_patch(plt.Rectangle(
+            (idx - 0.35, bot), 0.7, ht,
+            facecolor=col, edgecolor=col, linewidth=0.2, zorder=2
+        ))
+
+
+def make_trade_chart(df: pd.DataFrame, side: str,
+                     entry: float, sl: float, tp: float,
+                     entry_ts_str: str) -> bytes:
+    """진입 직후 1m 차트 (PNG bytes 반환)."""
+    n   = min(60, len(df))
+    sub = df.iloc[-n:].reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#0d1117")
+    _draw_candles(ax, sub)
+
+    ax.axhline(entry, color="#42a5f5", linewidth=1.0, linestyle="--", alpha=0.95, label=f"Entry {entry:,.1f}", zorder=3)
+    ax.axhline(tp,    color="#66bb6a", linewidth=1.0, linestyle="--", alpha=0.95, label=f"TP    {tp:,.1f}", zorder=3)
+    ax.axhline(sl,    color="#ef5350", linewidth=1.0, linestyle="--", alpha=0.95, label=f"SL    {sl:,.1f}", zorder=3)
+    ax.axvline(len(sub) - 1, color="#42a5f5", linewidth=0.8, alpha=0.6, zorder=4)
+
+    sym   = "▲ LONG" if side == "long" else "▼ SHORT"
+    color = "#66bb6a" if side == "long" else "#ef5350"
+    ax.set_title(
+        f"{sym}  BTC_USDT 1m  {entry_ts_str}  |  RR {RR_RATIO}x",
+        fontsize=9, color=color, pad=4, fontweight="bold"
+    )
+
+    yvals = [sl, tp, sub["low"].min(), sub["high"].max()]
+    ymin, ymax = min(yvals), max(yvals)
+    pad = (ymax - ymin) * 0.08
+    ax.set_ylim(ymin - pad, ymax + pad)
+    ax.set_xlim(-0.5, len(sub) - 0.5)
+    ax.set_xticks([])
+    ax.legend(loc="upper left", fontsize=7, facecolor="#1a1a2e",
+              edgecolor="#333", labelcolor="white", framealpha=0.85)
+    for sp in ax.spines.values():
+        sp.set_color("#2a2a2a"); sp.set_linewidth(0.4)
+    ax.tick_params(colors="#888", labelsize=7)
+    ax.yaxis.set_tick_params(labelcolor="#aaa")
+
+    plt.tight_layout(pad=0.4)
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#0d1117")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def make_exit_chart(df: pd.DataFrame, pos, status: str) -> bytes:
+    """청산 시 전체 거래 구간 차트 (진입→청산)."""
+    entry_ts_unix = int(pos.entry_ts.timestamp())
+    ts_vals  = df["ts"].values
+    entry_idx = int(np.searchsorted(ts_vals, entry_ts_unix))
+    entry_idx = min(entry_idx, len(df) - 1)
+    start = max(0, entry_idx - 8)
+    sub   = df.iloc[start:].reset_index(drop=True)
+
+    rel_e = entry_idx - start
+    rel_x = len(sub) - 1
+
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#0d1117")
+    _draw_candles(ax, sub)
+
+    ax.axhline(pos.entry_price, color="#42a5f5", lw=1.0, ls="--", alpha=0.9, label=f"Entry {pos.entry_price:,.1f}")
+    if pos.tp:
+        ax.axhline(pos.tp, color="#66bb6a", lw=1.0, ls="--", alpha=0.9, label=f"TP {pos.tp:,.1f}")
+    if pos.sl:
+        ax.axhline(pos.sl, color="#ef5350", lw=1.0, ls="--", alpha=0.9, label=f"SL {pos.sl:,.1f}")
+    ax.axvline(rel_e, color="#42a5f5", lw=0.8, alpha=0.6)
+    exit_col = {"WIN": "#66bb6a", "LOSS": "#ef5350", "EVEN": "#9e9e9e"}.get(status, "#9e9e9e")
+    ax.axvline(rel_x, color=exit_col, lw=1.2, alpha=0.9)
+
+    sym = "▲ LONG" if pos.side == "long" else "▼ SHORT"
+    ax.set_title(
+        f"{sym}  BTC_USDT 1m  |  {status}",
+        fontsize=9, color=exit_col, pad=4, fontweight="bold"
+    )
+    yvals = [pos.entry_price, sub["low"].min(), sub["high"].max()]
+    if pos.sl: yvals.append(pos.sl)
+    if pos.tp: yvals.append(pos.tp)
+    pad = (max(yvals) - min(yvals)) * 0.08
+    ax.set_ylim(min(yvals) - pad, max(yvals) + pad)
+    ax.set_xlim(-0.5, len(sub) - 0.5)
+    ax.set_xticks([])
+    ax.legend(loc="upper left", fontsize=7, facecolor="#1a1a2e",
+              edgecolor="#333", labelcolor="white", framealpha=0.85)
+    for sp in ax.spines.values():
+        sp.set_color("#2a2a2a"); sp.set_linewidth(0.4)
+    ax.tick_params(colors="#888", labelsize=7)
+    ax.yaxis.set_tick_params(labelcolor="#aaa")
+
+    plt.tight_layout(pad=0.4)
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#0d1117")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 # ── 유틸 ──────────────────────────────────────────────────────────────
 def get_balance(api: FuturesApi) -> float:
     return float(api.list_futures_accounts(settle=SETTLE).total)
@@ -170,6 +287,7 @@ class CandleReversalTrader:
     def __init__(self):
         self.api      = make_api()
         self.pos: Optional[Position] = None
+        self.df: Optional[pd.DataFrame] = None
         self._last_sig_ts: Optional[int] = self._load_sig_ts()
         stats = self._load_stats()
         self._wins         = stats["wins"]
@@ -439,10 +557,19 @@ class CandleReversalTrader:
             balance = 0.0
         sl_dist_actual = abs(entry_price - sl_price)
         risk_usdt = actual_contracts * QUANTO * sl_dist_actual
+
+        entry_ts_str = datetime.now(KST).strftime("%m/%d %H:%M")
+        img_bytes = None
+        try:
+            img_bytes = make_trade_chart(df, signal, entry_price, sl_price, tp_price, entry_ts_str)
+        except Exception as e:
+            logger.warning(f"진입 차트 생성 실패: {e}")
+
         tg.send_entry(
             side=signal, entry=entry_price, sl=sl_price, tp=tp_price,
             risk_usdt=risk_usdt, tp_usdt=risk_usdt * RR_RATIO,
             balance=balance, stats=self._stats(),
+            image_bytes=img_bytes,
         )
 
     def _place_sltp(self, side: str, sl_price: float, tp_price: float,
@@ -572,9 +699,19 @@ class CandleReversalTrader:
         except Exception:
             balance = 0.0
 
-        logger.info(f"청산: {status}  R={r_unit:+.2f}  잔고=${balance:.2f}")
+        hold_secs = (datetime.now(timezone.utc) - pos.entry_ts).total_seconds()
+        logger.info(f"청산: {status}  R={r_unit:+.2f}  잔고=${balance:.2f}  보유={hold_secs/60:.1f}m")
+
+        exit_img = None
+        if self.df is not None:
+            try:
+                exit_img = make_exit_chart(self.df, pos, status)
+            except Exception as e:
+                logger.warning(f"청산 차트 생성 실패: {e}")
+
         tg.send_exit(status=status, side=pos.side, entry=pos.entry_price,
-                     pnl_usdt=pnl, r_unit=r_unit, balance=balance, stats=self._stats())
+                     pnl_usdt=pnl, r_unit=r_unit, balance=balance, stats=self._stats(),
+                     image_bytes=exit_img, hold_seconds=hold_secs)
         self.pos = None
 
     def _force_close(self) -> None:
@@ -621,6 +758,7 @@ class CandleReversalTrader:
         while True:
             try:
                 df = fetch_klines(self.api)
+                self.df = df
                 self.check_position()
                 self.try_enter(df)
                 self.maybe_daily_report()
